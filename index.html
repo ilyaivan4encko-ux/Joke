@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Neon Void 3D</title>
+    <style>
+        /* --- CSS STYLES --- */
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #050505;
+            font-family: 'Courier New', Courier, monospace;
+            touch-action: none; /* Отключает зум и скролл на мобильных */
+        }
+        
+        #canvas-container {
+            width: 100vw;
+            height: 100vh;
+            display: block;
+        }
+
+        #ui-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+
+        .hud-text {
+            color: #00ffcc;
+            text-shadow: 0 0 10px #00ffcc;
+            font-size: 24px;
+            font-weight: bold;
+        }
+
+        #start-screen, #game-over-screen {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.85);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            pointer-events: auto;
+            z-index: 10;
+        }
+
+        h1 {
+            color: #ff0055;
+            text-shadow: 0 0 20px #ff0055;
+            font-size: 40px;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+            text-align: center;
+        }
+
+        p {
+            color: #fff;
+            text-align: center;
+            max-width: 80%;
+            line-height: 1.5;
+        }
+
+        button {
+            margin-top: 30px;
+            padding: 15px 40px;
+            background: transparent;
+            border: 2px solid #00ffcc;
+            color: #00ffcc;
+            font-size: 20px;
+            font-family: inherit;
+            font-weight: bold;
+            cursor: pointer;
+            box-shadow: 0 0 15px rgba(0, 255, 204, 0.5);
+            transition: 0.3s;
+        }
+
+        button:active {
+            background: #00ffcc;
+            color: #000;
+        }
+
+        .hidden { display: none !important; }
+        
+        /* Мобильные подсказки */
+        .controls-hint {
+            position: absolute;
+            bottom: 20px;
+            width: 100%;
+            text-align: center;
+            color: rgba(255, 255, 255, 0.5);
+            font-size: 14px;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="ui-layer">
+        <div class="hud-text">SCORE: <span id="score">0</span></div>
+        <div class="hud-text" style="text-align: right;">SPEED: <span id="speed">100%</span></div>
+    </div>
+
+    <div id="start-screen">
+        <h1>Neon Void</h1>
+        <p>Уклоняйся от красных блоков.<br>Коснись левой или правой части экрана для движения.</p>
+        <button id="start-btn">СТАРТ</button>
+    </div>
+
+    <div id="game-over-screen" class="hidden">
+        <h1>CRASHED</h1>
+        <p>Твой результат: <span id="final-score">0</span></p>
+        <button id="restart-btn">ЕЩЁ РАЗ</button>
+    </div>
+
+    <div class="controls-hint">Tap Left / Right to Move</div>
+
+    <div id="canvas-container"></div>
+
+    <script type="module">
+        import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
+
+        // --- КОНФИГУРАЦИЯ ИГРЫ ---
+        const CONFIG = {
+            laneWidth: 3.5,     // Ширина полосы движения
+            lanes: 3,           // Количество полос (-1, 0, 1)
+            baseSpeed: 0.5,     // Базовая скорость
+            speedIncrease: 0.0001, // Ускорение со временем
+            maxSpeed: 1.5,
+            fogDensity: 0.06,
+            colors: {
+                bg: 0x050505,
+                ground: 0x111111,
+                grid: 0x00ffcc,
+                player: 0x00ffcc,
+                obstacle: 0xff0055
+            }
+        };
+
+        // --- ПЕРЕМЕННЫЕ СОСТОЯНИЯ ---
+        let state = {
+            isPlaying: false,
+            score: 0,
+            speed: CONFIG.baseSpeed,
+            currentLane: 0, // -1 (лево), 0 (центр), 1 (право)
+            targetX: 0
+        };
+
+        // --- СЦЕНА, КАМЕРА, РЕНДЕР ---
+        const container = document.getElementById('canvas-container');
+        const scene = new THREE.Scene();
+        scene.fog = new THREE.FogExp2(CONFIG.colors.bg, CONFIG.fogDensity);
+        scene.background = new THREE.Color(CONFIG.colors.bg);
+
+        const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 100);
+        camera.position.set(0, 3, 6);
+        camera.lookAt(0, 0, -5);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // Оптимизация для ретины
+        container.appendChild(renderer.domElement);
+
+        // --- СВЕТ ---
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+        scene.add(ambientLight);
+        
+        const dirLight = new THREE.DirectionalLight(0xffffff, 1);
+        dirLight.position.set(5, 10, 5);
+        scene.add(dirLight);
+
+        // --- ИГРОВЫЕ ОБЪЕКТЫ ---
+        
+        // 1. Сетка пола (Эффект движения)
+        const gridHelper = new THREE.GridHelper(100, 100, CONFIG.colors.grid, 0x222222);
+        gridHelper.position.y = -0.5;
+        // Хак: двигаем текстуру или сам меш, чтобы создать иллюзию бесконечности
+        scene.add(gridHelper);
+
+        // Пол под сеткой (чтобы скрыть черноту снизу)
+        const planeGeo = new THREE.PlaneGeometry(200, 200);
+        const planeMat = new THREE.MeshBasicMaterial({ color: CONFIG.colors.ground });
+        const plane = new THREE.Mesh(planeGeo, planeMat);
+        plane.rotation.x = -Math.PI / 2;
+        plane.position.y = -0.6;
+        scene.add(plane);
+
+        // 2. Игрок (Корабль)
+        const playerGroup = new THREE.Group();
+        
+        // Корпус
+        const shipGeo = new THREE.ConeGeometry(0.5, 1.5, 4); // Пирамида
+        const shipMat = new THREE.MeshStandardMaterial({ 
+            color: CONFIG.colors.player, 
+            emissive: 0x004433,
+            roughness: 0.2,
+            metalness: 0.8,
+            flatShading: true
+        });
+        const ship = new THREE.Mesh(shipGeo, shipMat);
+        ship.rotation.x = -Math.PI / 2; // Положить на бок
+        ship.rotation.z = Math.PI / 4;  // Повернуть острием красиво
+        playerGroup.add(ship);
+        
+        // Двигатель (свет сзади)
+        const engineLight = new THREE.PointLight(CONFIG.colors.player, 2, 5);
+        engineLight.position.set(0, 0, 1);
+        playerGroup.add(engineLight);
+
+        scene.add(playerGroup);
+
+        // 3. Система частиц (Звездная пыль / Скорость)
+        const particlesGeo = new THREE.BufferGeometry();
+        const particlesCount = 300;
+        const posArray = new Float32Array(particlesCount * 3);
+        
+        for(let i = 0; i < particlesCount * 3; i++) {
+            posArray[i] = (Math.random() - 0.5) * 50; // Random X, Y, Z
+        }
+        
+        particlesGeo.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
+        const particlesMat = new THREE.PointsMaterial({
+            size: 0.05,
+            color: 0xffffff,
+            transparent: true,
+            opacity: 0.6
+        });
+        const starField = new THREE.Points(particlesGeo, particlesMat);
+        scene.add(starField);
+
+        // 4. Менеджер препятствий
+        const obstacles = [];
+        const obstacleGeo = new THREE.BoxGeometry(2, 2, 2);
+        const obstacleMat = new THREE.MeshStandardMaterial({ 
+            color: CONFIG.colors.obstacle,
+            emissive: 0x550000,
+            roughness: 0.1,
+            metalness: 0.5
+        });
+
+        // Создаем пул препятствий (чтобы не спавнить новые постоянно)
+        function initObstacles() {
+            for (let i = 0; i < 15; i++) {
+                const obs = new THREE.Mesh(obstacleGeo, obstacleMat);
+                obs.position.set(0, 0.5, -50 - (i * 10)); // Далеко впереди
+                obs.visible = false; // Скрыты пока не нужны
+                obs.userData = { active: false };
+                scene.add(obs);
+                obstacles.push(obs);
+            }
+        }
+        initObstacles();
+
+        // --- ЛОГИКА ИГРЫ ---
+
+        function spawnObstacle() {
+            // Находим неактивное препятствие
+            const obs = obstacles.find(o => !o.userData.active);
+            if (obs) {
+                obs.userData.active = true;
+                obs.visible = true;
+                // Случайная полоса (-1, 0, 1) * ширина
+                const lane = Math.floor(Math.random() * 3) - 1; 
+                obs.position.x = lane * CONFIG.laneWidth;
+                obs.position.z = -50; // Дистанция спавна
+                
+                // Эффект появления (масштаб)
+                obs.scale.set(0.1, 0.1, 0.1);
+            }
+        }
+
+        // Таймер спавна
+        let spawnTimer = 0;
+
+        function updateObstacles() {
+            // Частота спавна зависит от скорости
+            spawnTimer += state.speed;
+            if (spawnTimer > 15) { // Каждые условные 15 единиц дистанции
+                spawnObstacle();
+                spawnTimer = 0;
+            }
+
+            obstacles.forEach(obs => {
+                if (obs.userData.active) {
+                    obs.position.z += state.speed;
+                    
+                    // Анимация увеличения при приближении (Pop-in)
+                    if (obs.scale.x < 1) {
+                        obs.scale.addScalar(0.05);
+                    }
+
+                    // Проверка столкновения
+                    // Простая проверка AABB: дистанция по Z и совпадение по X
+                    const distZ = Math.abs(obs.position.z - playerGroup.position.z);
+                    const distX = Math.abs(obs.position.x - playerGroup.position.x);
+
+                    if (distZ < 1.5 && distX < 1.0) {
+                        gameOver();
+                    }
+
+                    // Сброс, если ушло за камеру
+                    if (obs.position.z > 5) {
+                        obs.userData.active = false;
+                        obs.visible = false;
+                    }
+                }
+            });
+        }
+
+        function updatePlayer() {
+            // Плавное движение (Lerp) к целевой полосе
+            playerGroup.position.x += (state.targetX - playerGroup.position.x) * 0.15;
+            
+            // Наклон корабля при повороте
+            const tilt = (playerGroup.position.x - state.targetX) * 0.2;
+            playerGroup.rotation.z = tilt;
+
+            // Анимация "парения"
+            playerGroup.position.y = Math.sin(Date.now() * 0.005) * 0.1;
+        }
+
+        function updateEnvironment() {
+            // Эффект бесконечного движения сетки
+            gridHelper.position.z += state.speed;
+            if (gridHelper.position.z > 10) gridHelper.position.z = 0;
+
+            // Движение звезд
+            starField.position.z += state.speed * 0.5;
+            if (starField.position.z > 20) starField.position.z = 0;
+        }
+
+        function updateScore() {
+            if (!state.isPlaying) return;
+            state.score++;
+            document.getElementById('score').innerText = Math.floor(state.score / 10);
+            
+            // Увеличение сложности
+            if (state.speed < CONFIG.maxSpeed) {
+                state.speed += CONFIG.speedIncrease;
+                document.getElementById('speed').innerText = Math.floor((state.speed / CONFIG.baseSpeed) * 100) + '%';
+            }
+        }
+
+        // --- УПРАВЛЕНИЕ ---
+        
+        function moveLane(direction) {
+            // direction: -1 (left), 1 (right)
+            const nextLane = state.currentLane + direction;
+            if (nextLane >= -1 && nextLane <= 1) {
+                state.currentLane = nextLane;
+                state.targetX = state.currentLane * CONFIG.laneWidth;
+            }
+        }
+
+        // Слушатели ввода
+        window.addEventListener('keydown', (e) => {
+            if (!state.isPlaying) return;
+            if (e.key === 'ArrowLeft' || e.key === 'a') moveLane(-1);
+            if (e.key === 'ArrowRight' || e.key === 'd') moveLane(1);
+        });
+
+        // Тач управление (делим экран пополам)
+        document.addEventListener('touchstart', (e) => {
+            if (!state.isPlaying) return;
+            const touchX = e.touches[0].clientX;
+            const halfWidth = window.innerWidth / 2;
+            
+            if (touchX < halfWidth) moveLane(-1);
+            else moveLane(1);
+        });
+
+        // Ресайз окна
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // --- GAME LOOP ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if (state.isPlaying) {
+                updatePlayer();
+                updateObstacles();
+                updateEnvironment();
+                updateScore();
+            } else {
+                // Idle animation (когда игра не идет)
+                gridHelper.position.z += 0.1;
+                if (gridHelper.position.z > 10) gridHelper.position.z = 0;
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        // --- GAME STATE CONTROL ---
+        
+        const startScreen = document.getElementById('start-screen');
+        const gameOverScreen = document.getElementById('game-over-screen');
+        const startBtn = document.getElementById('start-btn');
+        const restartBtn = document.getElementById('restart-btn');
+
+        function startGame() {
+            state.score = 0;
+            state.speed = CONFIG.baseSpeed;
+            state.currentLane = 0;
+            state.targetX = 0;
+            state.isPlaying = true;
+
+            // Сброс игрока
+            playerGroup.position.set(0, 0, 0);
+            
+            // Сброс препятствий
+            obstacles.forEach(o => {
+                o.userData.active = false;
+                o.visible = false;
+                o.position.z = -100;
+            });
+
+            startScreen.classList.add('hidden');
+            gameOverScreen.classList.add('hidden');
+        }
+
+        function gameOver() {
+            state.isPlaying = false;
+            document.getElementById('final-score').innerText = Math.floor(state.score / 10);
+            gameOverScreen.classList.remove('hidden');
+            
+            // Эффект "тряски" (простой)
+            camera.position.x = (Math.random() - 0.5);
+            camera.position.y = 3 + (Math.random() - 0.5);
+            setTimeout(() => { camera.position.set(0, 3, 6); }, 200);
+        }
+
+        startBtn.addEventListener('click', startGame);
+        restartBtn.addEventListener('click', startGame);
+
+        // Запуск цикла
+        animate();
+
+    </script>
+</body>
+</html>
